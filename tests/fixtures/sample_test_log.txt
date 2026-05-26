@@ -1,0 +1,5 @@
+voltage=12.0 current=1.20 response_time_ms=45 fail_count=0 crc_error_rate=0.001 retry_count=0
+전압: 12.1 전류: 1.18 응답시간_ms: 48 실패횟수: 0 CRC 오류율: 0.002 재시도횟수: 0
+volt=11.9 amp=1.25 latency_ms=50 failures=0 crc_error_pct=0.001 retries=1
+v: 12.2 a: 1.22 response_ms: 47 failure_count: 0 crc_errors: 0.000 retry_count: 0
+voltage=24.8 current=4.90 response_time_ms=650 fail_count=7 crc_error_rate=0.180 retry_count=9 maintenance_case="과전압 및 CRC 오류로 커넥터 재체결 후 케이블 교체"

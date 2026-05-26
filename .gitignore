@@ -1,0 +1,26 @@
+# Build outputs
+x64/
+Debug/
+Release/
+*.obj
+*.ilk
+*.pdb
+*.idb
+*.tlog
+*.lastbuildstate
+*.recipe
+*.log
+*.FileListAbsolute.txt
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# VS user files
+.vs/
+*.user
+
+# Temp/data artifacts
+catboost_info/
+out/
