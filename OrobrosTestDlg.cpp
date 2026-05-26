@@ -38,7 +38,7 @@ BOOL COrobrosTestDlg::OnInitDialog()
 {
     CDialogEx::OnInitDialog();
     SetWindowText(L"OrobrosTest - Maintenance Report Runner");
-    m_commandEdit.SetWindowText(L"\"C:\\Users\\yjs\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\python.exe\" \"C:\\Users\\yjs\\Desktop\\JAN\\Policy\\OrobrosTest\\tools\\generate_maintenance_report.py\" --project-root \"C:\\Users\\yjs\\Desktop\\JAN\\Policy\\OrobrosTest\" --log-root \"C:\\Users\\yjs\\Desktop\\JAN\\LOG\" --out-doc \"C:\\Users\\yjs\\Desktop\\JAN\\Policy\\Data\\JAN_maintenance_report.docx\"");
+    m_commandEdit.SetWindowText(L"\"C:\\Users\\yjs\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\python.exe\" \"C:\\Users\\yjs\\Desktop\\JAN\\OrobrosTest\\tools\\run_maintenance_with_review.py\" --python \"C:\\Users\\yjs\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\python.exe\" --project-root \"C:\\Users\\yjs\\Desktop\\JAN\\OrobrosTest\" --log-root \"C:\\Users\\yjs\\Desktop\\JAN\\LOG\" --out-doc \"C:\\Users\\yjs\\Desktop\\JAN\\OrobrosTest\\out\\JAN_maintenance_report_ui.docx\" --out-json \"C:\\Users\\yjs\\Desktop\\JAN\\OrobrosTest\\out\\JAN_maintenance_report_ui.json\" --review-history-dir \"C:\\Users\\yjs\\Desktop\\JAN\\OrobrosTest\\out\" --review-out-dir \"C:\\Users\\yjs\\Desktop\\JAN\\OrobrosTest\\out\\ouroboros_review_ui\"");
     m_contextEdit.SetWindowText(L"우선점검: 시스템제어기조립체; 해결: (해결 시 조치항목 입력)");
     SetDlgItemTextW(IDC_BUTTON_LOAD_LOG, L"로그 읽기");
     m_sendButton.EnableWindow(FALSE);
@@ -267,23 +267,58 @@ void COrobrosTestDlg::ReaderLoop()
     PostMessage(WM_PROCESS_EXITED, 0, 0);
 }
 
-bool COrobrosTestDlg::WriteAnswer(const CString& answer)
+bool COrobrosTestDlg::WriteAnswer(const CString& answer, DWORD* lastError)
 {
-    if (!m_running || !m_childStdInWr) return false;
+    if (lastError) *lastError = ERROR_SUCCESS;
+
+    if (!m_running || !m_childStdInWr) {
+        if (lastError) *lastError = ERROR_INVALID_HANDLE;
+        return false;
+    }
+
+    if (m_pi.hProcess && WaitForSingleObject(m_pi.hProcess, 0) != WAIT_TIMEOUT) {
+        if (lastError) *lastError = ERROR_BROKEN_PIPE;
+        return false;
+    }
+
     CString line = answer + L"\r\n";
     int bytesNeeded = WideCharToMultiByte(CP_UTF8, 0, line, line.GetLength(), nullptr, 0, nullptr, nullptr);
-    std::vector<char> bytes(bytesNeeded);
-    WideCharToMultiByte(CP_UTF8, 0, line, line.GetLength(), bytes.data(), bytesNeeded, nullptr, nullptr);
+    if (bytesNeeded <= 0) {
+        if (lastError) *lastError = GetLastError();
+        return false;
+    }
+
+    std::vector<char> bytes(static_cast<size_t>(bytesNeeded));
+    if (WideCharToMultiByte(CP_UTF8, 0, line, line.GetLength(), bytes.data(), bytesNeeded, nullptr, nullptr) <= 0) {
+        if (lastError) *lastError = GetLastError();
+        return false;
+    }
+
     DWORD written = 0;
-    return WriteFile(m_childStdInWr, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) && written == bytes.size();
+    if (!WriteFile(m_childStdInWr, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr)) {
+        if (lastError) *lastError = GetLastError();
+        return false;
+    }
+
+    if (written != bytes.size()) {
+        if (lastError) *lastError = ERROR_WRITE_FAULT;
+        return false;
+    }
+
+    return true;
 }
 
 void COrobrosTestDlg::MaybeShowQuestionDialog(const CString& chunk)
 {
+    // child가 이미 종료됐거나 stdin handle이 닫힌 상태에서는 질문 Dialog를 띄우지 않는다.
+    if (!m_running || !m_childStdInWr) {
+        return;
+    }
+
     CString currentCommand;
     m_commandEdit.GetWindowText(currentCommand);
     currentCommand.MakeLower();
-    if (currentCommand.Find(L"ouroboros") < 0) {
+    if (currentCommand.Find(L"ouroboros") < 0 && currentCommand.Find(L"run_maintenance_with_review.py") < 0) {
         return;
     }
 
@@ -291,25 +326,94 @@ void COrobrosTestDlg::MaybeShowQuestionDialog(const CString& chunk)
     trimmed.Trim();
     if (trimmed.IsEmpty()) return;
 
-    bool looksLikeQuestion =
-        trimmed.Find(L"?") >= 0 ||
-        trimmed.Find(L"질문") >= 0 ||
-        trimmed.Find(L"Question") >= 0 ||
-        trimmed.Find(L"Q:") >= 0;
-    if (!looksLikeQuestion) return;
-    if (trimmed == m_lastQuestionPopup) return;
-    m_lastQuestionPopup = trimmed;
+    // 한 번의 chunk에 Q1~Q4가 같이 들어올 수 있으므로 [INTERVIEW_Qn]을 모두 순회 처리한다.
+    int scanPos = 0;
+    while (m_interviewQuestionCount < 4) {
+        int marker = trimmed.Find(L"[INTERVIEW_Q", scanPos);
+        if (marker < 0) break;
 
-    CString prompt = trimmed;
-    prompt += L"\r\n\r\n예를 누르면 '예', 아니요를 누르면 '아니요'가 Ouroboros stdin pipe로 전송됩니다.";
+        int qNumPos = marker + static_cast<int>(wcslen(L"[INTERVIEW_Q"));
+        if (qNumPos >= trimmed.GetLength()) break;
 
-    int selected = MessageBox(prompt, L"Ouroboros 질문 - 답변 선택", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1);
-    CString answer = (selected == IDYES) ? L"예" : L"아니요";
+        wchar_t ch = trimmed.GetAt(qNumPos);
+        if (ch < L'1' || ch > L'4') {
+            scanPos = qNumPos + 1;
+            continue;
+        }
 
-    AppendText(L"\r\n[DIALOG ANSWER] " + answer + L"\r\n");
-    if (!WriteAnswer(answer)) {
-        AppendText(L"[ERROR] Dialog 답변을 stdin pipe로 전송하지 못했습니다.\r\n");
-        MessageBox(L"Dialog 답변을 stdin pipe로 전송하지 못했습니다.", L"전송 실패", MB_ICONERROR);
+        int qNum = static_cast<int>(ch - L'0');
+        if (qNum <= m_interviewQuestionCount) {
+            scanPos = qNumPos + 1;
+            continue;
+        }
+
+        int lineEnd = trimmed.Find(L"\n", marker);
+        CString oneQuestion = (lineEnd >= 0) ? trimmed.Mid(marker, lineEnd - marker) : trimmed.Mid(marker);
+        oneQuestion.Trim();
+
+        m_interviewQuestionCount = qNum;
+
+        CString prompt = oneQuestion;
+        CString qGuide;
+        qGuide.Format(L"\r\n\r\n[질문 %d/4] 예=\"예\", 아니요=\"아니요\"를 전송합니다.", m_interviewQuestionCount);
+        prompt += qGuide;
+
+        int selected = MessageBox(prompt, L"Ouroboros 인터뷰 질문", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1);
+        CString answer = (selected == IDYES) ? L"예" : L"아니요";
+
+        bool childAlive = (m_running && m_childStdInWr && (!m_pi.hProcess || WaitForSingleObject(m_pi.hProcess, 0) == WAIT_TIMEOUT));
+        if (!childAlive) {
+            AppendText(L"\r\n[INFO] Dialog 응답은 기록만 하고 자동전송은 생략했습니다. (프로세스 종료)\r\n");
+            return;
+        }
+
+        AppendText(L"\r\n[DIALOG ANSWER Q" + CString(std::to_wstring(m_interviewQuestionCount).c_str()) + L"] " + answer + L"\r\n");
+        DWORD writeErr = ERROR_SUCCESS;
+        if (!WriteAnswer(answer, &writeErr)) {
+            if (writeErr == ERROR_BROKEN_PIPE || writeErr == ERROR_INVALID_HANDLE) {
+                AppendText(L"[INFO] Dialog 응답 자동전송 생략: child stdin closed\r\n");
+            }
+            else {
+                CString detail = FormatWin32Error(writeErr);
+                AppendText(L"[WARN] Dialog 답변 자동전송 실패: " + detail + L"\r\n");
+                MessageBox(L"Dialog 답변 전송에 실패했습니다. Send 버튼으로 수동 전송해주세요.\r\n" + detail,
+                    L"전송 실패", MB_ICONWARNING);
+            }
+        }
+
+        scanPos = (lineEnd >= 0) ? (lineEnd + 1) : (qNumPos + 1);
+    }
+
+    if (m_interviewQuestionCount >= 4 && !m_finalInputPromptShown) {
+        m_finalInputPromptShown = true;
+        int askInput = MessageBox(
+            L"인터뷰 4개 질문이 끝났습니다.\r\n\r\n"
+            L"이제 직접 입력 답변을 전송할까요?\r\n"
+            L"- 예: 아래 답변 입력칸의 텍스트를 즉시 전송\r\n"
+            L"- 아니요: 전송하지 않음",
+            L"직접 입력 전송",
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1);
+
+        if (askInput == IDYES) {
+            CString manual;
+            m_answerEdit.GetWindowText(manual);
+            manual.Trim();
+            if (manual.IsEmpty()) {
+                MessageBox(L"답변 입력칸이 비어 있습니다. 텍스트 입력 후 Send 버튼을 눌러주세요.", L"입력 필요", MB_ICONINFORMATION);
+            }
+            else {
+                AppendText(L"\r\n[MANUAL ANSWER] " + manual + L"\r\n");
+                DWORD writeErr = ERROR_SUCCESS;
+                if (!WriteAnswer(manual, &writeErr)) {
+                    CString detail = FormatWin32Error(writeErr);
+                    AppendText(L"[WARN] 직접 입력 답변 자동전송 실패: " + detail + L"\r\n");
+                    if (writeErr != ERROR_BROKEN_PIPE) {
+                        MessageBox(L"직접 입력 답변 전송에 실패했습니다. Send 버튼으로 수동 전송해주세요.\r\n" + detail,
+                            L"전송 실패", MB_ICONWARNING);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -430,6 +534,8 @@ void COrobrosTestDlg::OnBnClickedStart()
     if (m_running) return;
     CString cmd = BuildCommandLine();
     m_capturedOutput.Empty();
+    m_interviewQuestionCount = 0;
+    m_finalInputPromptShown = false;
     AppendText(L"\r\n[START] ");
     AppendText(cmd + L"\r\n");
     if (!StartProcess(cmd)) {
@@ -452,8 +558,9 @@ void COrobrosTestDlg::OnBnClickedSend()
     answer.Trim();
     if (answer.IsEmpty()) return;
     AppendText(L"\r\n[USER] " + answer + L"\r\n");
-    if (!WriteAnswer(answer)) {
-        MessageBox(L"stdin pipe로 답변 전송 실패", L"전송 실패", MB_ICONERROR);
+    DWORD writeErr = ERROR_SUCCESS;
+    if (!WriteAnswer(answer, &writeErr)) {
+        MessageBox(L"stdin pipe로 답변 전송 실패\r\n" + FormatWin32Error(writeErr), L"전송 실패", MB_ICONERROR);
     }
     m_answerEdit.SetWindowText(L"");
 }

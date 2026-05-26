@@ -322,6 +322,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--log-root", required=True)
     ap.add_argument("--out-doc", required=True)
+    ap.add_argument("--out-json", default="", help="추가 저장용 JSON 보고서 경로 (미지정 시 out-doc와 같은 이름의 .json)")
     ap.add_argument("--project-root", required=True)
     ap.add_argument("--focus-log", default="", help="특정 시험 로그 파일 경로 (예: .../6. RICA_251106.TXT)")
     ap.add_argument("--operator-feedback", default="", help="운용자 입력 메모. 예) 우선점검: 시스템제어기조립체")
@@ -335,6 +336,7 @@ def main() -> int:
 
     log_root = Path(args.log_root)
     out_doc = Path(args.out_doc)
+    out_json = Path(args.out_json) if args.out_json else out_doc.with_suffix(".json")
     project_root = Path(args.project_root)
 
     if not log_root.exists():
@@ -428,7 +430,35 @@ def main() -> int:
     memory_path = Path(args.memory_json) if args.memory_json else (project_root / "out" / "inspection_memory.json")
     memory = load_inspection_memory(memory_path)
 
+    fail_rows = [r for r in rows if r["is_fail"]]
+
     doc = Document()
+    report_payload: dict = {
+        "generated_at": f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}",
+        "log_root": str(log_root),
+        "model_paths": {
+            "anomaly_model": str(iso_path),
+            "cause_model": str(cause_path),
+        },
+        "summary": {
+            "total_logs": total,
+            "fail_candidates": fail_n,
+            "high_risk_count": high_n,
+        },
+        "top_causes": [{"label": str(k), "count": int(v)} for k, v in top_causes],
+        "fail_candidates": [
+            {
+                "file": Path(r["file"]).name,
+                "anomaly": float(r["anomaly"]),
+                "cause": str(r["cause"]),
+                "risk": str(r["risk"]),
+                "reason": str(r["reason"]),
+            }
+            for r in fail_rows[:80]
+        ],
+        "focus": None,
+        "memory_json": str(memory_path),
+    }
     doc.add_heading("정비 통합 보고서", level=1)
     doc.add_paragraph(f"생성시각: {dt.datetime.now():%Y-%m-%d %H:%M:%S}")
     doc.add_paragraph(f"로그 경로: {log_root}")
@@ -450,7 +480,6 @@ def main() -> int:
         c[1].text = str(v)
 
     doc.add_heading("FAIL 후보 및 선정 이유", level=2)
-    fail_rows = [r for r in rows if r["is_fail"]]
     doc.add_paragraph(f"총 FAIL 후보: {len(fail_rows)}건")
     doc.add_paragraph('이상점수는 Isolation Forest가 주는 "정상에서 얼마나 벗어났는지" 점수입니다.')
     t3 = doc.add_table(rows=1, cols=5)
@@ -523,6 +552,18 @@ def main() -> int:
             f"중장기 예측 위험도는 {risk}로 평가되었고, {trend} {similar_case_line} {exclusion_line} {exclusion_check} {memory_note}"
         )
         doc.add_paragraph(summary)
+        report_payload["focus"] = {
+            "file": focus_path.name,
+            "anomaly": float(focus_row["anomaly"]),
+            "cause": str(focus_row["cause"]),
+            "risk": str(risk),
+            "short_diag": short_diag,
+            "similar_case_names": [Path(r["file"]).name for r in similar_cases[:3]],
+            "recommended_exclusion_items": exclusion_items,
+            "checklist": exclusion_check,
+            "summary_text": summary,
+            "test_ids": focus_test_ids,
+        }
 
         update_memory_with_feedback(
             memory,
@@ -544,7 +585,10 @@ def main() -> int:
 
     out_doc.parent.mkdir(parents=True, exist_ok=True)
     doc.save(out_doc)
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(report_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(str(out_doc))
+    print(str(out_json))
     return 0
 
 

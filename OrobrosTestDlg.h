@@ -41,13 +41,15 @@ private:
     CString m_lastQuestionPopup;
     CString m_capturedOutput;
     CString m_selectedLogPath;
+    int m_interviewQuestionCount = 0;
+    bool m_finalInputPromptShown = false;
 
     void AppendText(const CString& text);
     bool StartProcess(const CString& commandLine);
     void StopProcess();
     void CloseProcessHandles();
     void ReaderLoop();
-    bool WriteAnswer(const CString& answer);
+    bool WriteAnswer(const CString& answer, DWORD* lastError = nullptr);
     static CString Utf8ToWide(const char* data, int len);
     static CString QuoteArg(const CString& s);
     static CString FormatWin32Error(DWORD error);

@@ -4,6 +4,7 @@
 #include <string>
 #include <iostream>
 #include <vector>
+#include <filesystem>
 
 static void CloseIf(HANDLE& h) {
     if (h && h != INVALID_HANDLE_VALUE) {
@@ -41,7 +42,10 @@ int wmain() {
     si.hStdInput = inRd;
 
     PROCESS_INFORMATION pi{};
-    std::wstring cmd = L"python C:\\Users\\kangd\\Desktop\\OrobrosTest\\mock_ouroboros.py";
+    wchar_t exePath[MAX_PATH] = {0};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::filesystem::path mockPath = std::filesystem::path(exePath).parent_path().parent_path().parent_path() / L"mock_ouroboros.py";
+    std::wstring cmd = L"python \"" + mockPath.wstring() + L"\"";
     BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     CloseIf(outWr);
     CloseIf(inRd);
