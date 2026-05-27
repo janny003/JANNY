@@ -16,21 +16,107 @@ def _safe_list(v: Any) -> list[Any]:
     return v if isinstance(v, list) else []
 
 
+def _project_root_from_report(current: dict[str, Any]) -> Path:
+    current_report = Path(str(current.get("__current_report_path", "")))
+    if current_report.name:
+        # expected: <project>/out/<report>.json
+        return current_report.parent.parent
+    memory_json = str(current.get("memory_json", ""))
+    if memory_json:
+        return Path(memory_json).parent.parent
+    return Path.cwd()
+
+
+def _shorten(text: str, limit: int = 80) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def infer_source_action_candidates(current: dict[str, Any]) -> list[dict[str, str]]:
+    """Find source/config files that should be checked for the failed item.
+
+    This keeps the interview grounded in concrete code/config evidence instead
+    of asking generic maintenance questions.
+    """
+    root = _project_root_from_report(current)
+    focus = current.get("focus") if isinstance(current.get("focus"), dict) else {}
+    test_ids = [str(x) for x in _safe_list(focus.get("test_ids"))]
+    focus_file = str(focus.get("file", ""))
+    tokens = {t.lower() for t in test_ids}
+    for part in Path(focus_file).stem.replace("-", " ").replace("_", " ").split():
+        if len(part) >= 3:
+            tokens.add(part.lower())
+
+    candidates: list[dict[str, str]] = []
+    priority_files = [
+        root / "data" / "fault_exclusion_master_map.csv",
+        root / "tools" / "generate_maintenance_report.py",
+        root / "tools" / "ouroboros_review_loop.py",
+        root / "tools" / "run_maintenance_with_review.py",
+    ]
+    for path in priority_files:
+        if path.exists():
+            candidates.append({
+                "file": str(path),
+                "reason": "고장배제 매핑/진단 질문/보고서 생성 로직 확인 대상",
+                "action": "해당 불량 항목의 고장배제 목록과 판정 조건이 맞는지 확인",
+            })
+
+    searchable_ext = {".py", ".cpp", ".h", ".hpp", ".c", ".csv", ".md"}
+    for path in root.rglob("*"):
+        if len(candidates) >= 8:
+            break
+        if not path.is_file() or path.suffix.lower() not in searchable_ext:
+            continue
+        if any(str(path) == c["file"] for c in candidates):
+            continue
+        try:
+            txt = path.read_text(encoding="utf-8", errors="ignore").lower()
+        except Exception:
+            continue
+        if any(tok and tok in txt for tok in tokens):
+            candidates.append({
+                "file": str(path),
+                "reason": f"focus/test token 매칭: {', '.join(sorted(tokens)[:4])}",
+                "action": "불량 항목 처리 조건, 로그 파싱 키워드, 조치 문구 정합성 확인",
+            })
+
+    return candidates[:8]
+
+
 def build_interview(current: dict[str, Any]) -> list[str]:
-    summary = current.get("summary", {}) if isinstance(current.get("summary"), dict) else {}
-    fail_count = int(summary.get("fail_candidates", 0) or 0)
-    high_risk = int(summary.get("high_risk_count", 0) or 0)
+    focus = current.get("focus") if isinstance(current.get("focus"), dict) else {}
+    fail_candidates = _safe_list(current.get("fail_candidates"))
+    target = str(focus.get("file") or (fail_candidates[0].get("file") if fail_candidates and isinstance(fail_candidates[0], dict) else "불량 후보"))
+    risk = str(focus.get("risk") or (fail_candidates[0].get("risk") if fail_candidates and isinstance(fail_candidates[0], dict) else "UNKNOWN"))
+    cause = str(focus.get("cause") or (fail_candidates[0].get("cause") if fail_candidates and isinstance(fail_candidates[0], dict) else "unknown"))
+    test_ids = ", ".join(str(x) for x in _safe_list(focus.get("test_ids"))) or "GLOBAL"
+    exclusions = [str(x) for x in _safe_list(focus.get("recommended_exclusion_items"))]
+    if not exclusions:
+        exclusions = ["통신 경로", "전원 경로", "케이블/커넥터"]
+
+    source_candidates = infer_source_action_candidates(current)
+    src1 = Path(source_candidates[0]["file"]).name if source_candidates else "진단 소스"
+    src2 = Path(source_candidates[1]["file"]).name if len(source_candidates) > 1 else src1
 
     # GUI에서 Yes/No 다이얼로그 4회로 받기 위해, 항상 4개의 폐쇄형 질문을 생성한다.
-    q1 = "이번 진단에서 1순위 FAIL 후보를 즉시 정비 대상으로 확정할까요? (Yes/No)"
-    q2 = "정비 후 동일 조건 재시험을 바로 진행할까요? (Yes/No)"
-    q3 = "이번 점검에서 전원/케이블/통신 라인을 우선 점검 순서로 유지할까요? (Yes/No)"
-    if fail_count == 0:
-        q4 = "현재 FAIL 후보가 없으므로 watch/anomaly 임계값 재조정을 지금 수행할까요? (Yes/No)"
-    elif high_risk > 0:
-        q4 = "고위험 항목이 있으므로 즉시 중지(FAIL-STOP) 기준을 이번 회차에 적용할까요? (Yes/No)"
-    else:
-        q4 = "이번 결과를 baseline으로 저장하고 다음 회차 비교 기준으로 확정할까요? (Yes/No)"
+    # 질문 내용은 사용자가 요구한 대로 고장/불량 항목 + 고장배제 목록 + 소스코드 조치 확인 기준으로 구성한다.
+    q1 = (
+        f"불량/고장 의심 항목 '{_shorten(target)}'(시험ID {test_ids}, 위험도 {risk})에 대해 "
+        f"고장배제 1순위 '{_shorten(exclusions[0])}'부터 실제 조치할까요? (Yes/No)"
+    )
+    q2 = (
+        f"같은 항목의 고장배제 목록 '{_shorten(' / '.join(exclusions[:3]), 120)}' 순서로 "
+        "현장 점검 체크리스트를 확정할까요? (Yes/No)"
+    )
+    q3 = (
+        f"소스코드/설정 '{src1}'에서 해당 불량 항목의 판정·매핑 조건을 먼저 확인하고 "
+        "필요 시 수정 조치로 등록할까요? (Yes/No)"
+    )
+    q4 = (
+        f"원인분류 '{cause}'와 고장배제 결과가 맞지 않으면 '{src2}'의 로그 파싱/질문 생성 로직을 "
+        "보강한 뒤 동일 조건 재시험을 진행할까요? (Yes/No)"
+    )
 
     return [q1, q2, q3, q4]
 
@@ -169,7 +255,9 @@ def run(current_report_json: Path, history_dir: Path, out_dir: Path) -> dict[str
     out_dir.mkdir(parents=True, exist_ok=True)
 
     current = _load_json(current_report_json)
+    current["__current_report_path"] = str(current_report_json)
     interview = build_interview(current)
+    source_action_candidates = infer_source_action_candidates(current)
     qa = build_qa(current)
     evaluate = build_evaluate(qa)
 
@@ -182,6 +270,7 @@ def run(current_report_json: Path, history_dir: Path, out_dir: Path) -> dict[str
         "current_report": str(current_report_json),
         "step7": {
             "interview_questions": interview,
+            "source_action_candidates": source_action_candidates,
             "qa_checks": qa,
             "evaluate": evaluate,
         },
@@ -210,6 +299,9 @@ def run(current_report_json: Path, history_dir: Path, out_dir: Path) -> dict[str
     ]
     for i, q in enumerate(interview, 1):
         md_lines.append(f"{i}. {q}")
+    md_lines += ["", "### Source/Config Action Candidates"]
+    for item in source_action_candidates:
+        md_lines.append(f"- {item.get('file', '')}: {item.get('action', '')} ({item.get('reason', '')})")
     md_lines += ["", "## Step7 QA"]
     for c in qa:
         md_lines.append(f"- [{c['result']}] {c['check']}")
