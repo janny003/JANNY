@@ -243,6 +243,46 @@ def collect_similar_cases(focus_row: dict, rows: list[dict], topk: int = 5) -> l
     return [{"score": s, **rr} for s, rr in sims[:topk]]
 
 
+def build_interview_memory_note(memory: dict) -> str:
+    last = memory.get("last_interview", {}) if isinstance(memory, dict) else {}
+    if not isinstance(last, dict):
+        return ""
+    answers = last.get("answers", [])
+    if not isinstance(answers, list) or not answers:
+        return ""
+
+    labels = [
+        "1순위 정비대상 확정",
+        "동일 조건 재시험",
+        "전원/케이블/통신 우선점검 유지",
+        "회차별 고위험/기준 적용",
+    ]
+    pairs = []
+    for i, ans in enumerate(answers[:4]):
+        label = labels[i] if i < len(labels) else f"질문{i + 1}"
+        pairs.append(f"{label}={ans}")
+    return "이전 인터뷰 답변 반영: " + ", ".join(pairs)
+
+
+def apply_interview_priority(memory: dict, exclusion_items: list[str]) -> tuple[list[str], str]:
+    last = memory.get("last_interview", {}) if isinstance(memory, dict) else {}
+    answers = last.get("answers", []) if isinstance(last, dict) else []
+    if not isinstance(answers, list) or len(answers) < 3:
+        return exclusion_items, ""
+
+    # Q3: 전원/케이블/통신 라인을 우선 점검 순서로 유지할지 여부.
+    # Yes면 다음 진단 권고 앞쪽에 명시적으로 반영한다.
+    if str(answers[2]).strip() != "예":
+        return exclusion_items, ""
+
+    preferred = "전원/케이블/통신 라인"
+    reordered = [preferred]
+    for item in exclusion_items:
+        if item != preferred and item not in reordered:
+            reordered.append(item)
+    return reordered[:5], "(이전 인터뷰 답변 반영: 전원/케이블/통신 라인 우선 유지)"
+
+
 def apply_resolved_priority(memory: dict, test_ids: list[str], exclusion_items: list[str]) -> tuple[list[str], str]:
     solved_map = memory.get("resolved_priority", {}) if isinstance(memory, dict) else {}
     merged = {}
@@ -534,6 +574,8 @@ def main() -> int:
             similar_case_line = "유사 이력: " + " / ".join(names)
 
         exclusion_items, memory_note = apply_resolved_priority(memory, focus_test_ids, exclusion_items)
+        exclusion_items, interview_priority_note = apply_interview_priority(memory, exclusion_items)
+        interview_memory_note = build_interview_memory_note(memory)
 
         prefer_first = str(memory.get("preferences", {}).get("prefer_first_check", "")).strip()
         if prefer_first:
@@ -549,7 +591,8 @@ def main() -> int:
         summary = (
             f"본 시험 로그({focus_path.name})를 이전 누적 데이터({len(hist)}건)와 비교 분석한 결과, "
             f"이전 FAIL 비율은 {hist_fail_rate*100.0:.1f}%였습니다. {short_diag} "
-            f"중장기 예측 위험도는 {risk}로 평가되었고, {trend} {similar_case_line} {exclusion_line} {exclusion_check} {memory_note}"
+            f"중장기 예측 위험도는 {risk}로 평가되었고, {trend} {similar_case_line} "
+            f"{exclusion_line} {exclusion_check} {memory_note} {interview_priority_note} {interview_memory_note}"
         )
         doc.add_paragraph(summary)
         report_payload["focus"] = {
@@ -563,6 +606,8 @@ def main() -> int:
             "checklist": exclusion_check,
             "summary_text": summary,
             "test_ids": focus_test_ids,
+            "interview_memory_note": interview_memory_note,
+            "interview_priority_note": interview_priority_note,
         }
 
         update_memory_with_feedback(

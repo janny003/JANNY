@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,54 @@ def _collect_interview_answers(step7: dict[str, Any]) -> list[str]:
         print(f"[INTERVIEW_A{i}] {yn}", flush=True)
 
     return answers
+
+
+def _persist_interview_answers(report_json: Path, review_json: Path, answers: list[str]) -> None:
+    """Persist Step7 Yes/No answers so the next diagnosis can use them."""
+    if not answers:
+        return
+
+    try:
+        report_data = json.loads(report_json.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    memory_path_raw = str(report_data.get("memory_json") or "").strip()
+    if not memory_path_raw:
+        return
+
+    memory_path = Path(memory_path_raw)
+    try:
+        memory = json.loads(memory_path.read_text(encoding="utf-8")) if memory_path.exists() else {}
+    except Exception:
+        memory = {}
+
+    focus = report_data.get("focus") if isinstance(report_data.get("focus"), dict) else {}
+    try:
+        review_data = json.loads(review_json.read_text(encoding="utf-8")) if review_json.exists() else {}
+    except Exception:
+        review_data = {}
+    step7 = review_data.get("step7", {}) if isinstance(review_data.get("step7"), dict) else {}
+    questions = step7.get("interview_questions", []) if isinstance(step7.get("interview_questions", []), list) else []
+
+    record = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "current_report": str(report_json),
+        "focus_log": str(focus.get("file", "")),
+        "test_ids": focus.get("test_ids", []),
+        "questions": questions[:4],
+        "answers": answers[:4],
+    }
+
+    memory["last_interview"] = record
+    hist = memory.setdefault("interview_history", [])
+    if isinstance(hist, list):
+        hist.append(record)
+        if len(hist) > 200:
+            del hist[:-200]
+
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text(json.dumps(memory, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -111,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             if answers:
                 review_data.setdefault("step7", {})["interview_answers"] = answers
                 review_json.write_text(json.dumps(review_data, ensure_ascii=False, indent=2), encoding="utf-8")
+                _persist_interview_answers(out_json, review_json, answers)
         except Exception as ex:
             print(f"[REVIEW] summary parse skipped: {ex}", flush=True)
 
