@@ -33,10 +33,11 @@ def _shorten(text: str, limit: int = 80) -> str:
 
 
 def infer_source_action_candidates(current: dict[str, Any]) -> list[dict[str, str]]:
-    """Find source/config files that should be checked for the failed item.
+    """Find code/config evidence used to derive main-equipment checks.
 
-    This keeps the interview grounded in concrete code/config evidence instead
-    of asking generic maintenance questions.
+    The interview should not ask the operator to inspect source code.  Instead,
+    we inspect code/config evidence here and turn it into questions about what
+    to check on the main equipment side.
     """
     root = _project_root_from_report(current)
     focus = current.get("focus") if isinstance(current.get("focus"), dict) else {}
@@ -58,8 +59,8 @@ def infer_source_action_candidates(current: dict[str, Any]) -> list[dict[str, st
         if path.exists():
             candidates.append({
                 "file": str(path),
-                "reason": "고장배제 매핑/진단 질문/보고서 생성 로직 확인 대상",
-                "action": "해당 불량 항목의 고장배제 목록과 판정 조건이 맞는지 확인",
+                "reason": "고장배제 매핑/진단 질문/보고서 생성 로직 근거",
+                "action": "소스/설정 근거상 주장비 측 확인 필요 부위를 도출",
             })
 
     searchable_ext = {".py", ".cpp", ".h", ".hpp", ".c", ".csv", ".md"}
@@ -78,10 +79,31 @@ def infer_source_action_candidates(current: dict[str, Any]) -> list[dict[str, st
             candidates.append({
                 "file": str(path),
                 "reason": f"focus/test token 매칭: {', '.join(sorted(tokens)[:4])}",
-                "action": "불량 항목 처리 조건, 로그 파싱 키워드, 조치 문구 정합성 확인",
+                "action": "소스 내용 근거로 주장비 측 확인 필요 부위와 로그 판정 근거를 도출",
             })
 
     return candidates[:8]
+
+
+def _main_equipment_parts(exclusions: list[str]) -> list[str]:
+    parts: list[str] = []
+    skip_words = ["케이블", "tw", "치구"]
+    for item in exclusions:
+        for raw in str(item).replace(",", "/").split("/"):
+            part = raw.strip()
+            if not part:
+                continue
+            low = part.lower()
+            if any(w in low for w in skip_words):
+                continue
+            part = part.replace("우선 점검", "").strip()
+            if part and part not in parts:
+                parts.append(part)
+    if not parts:
+        for item in exclusions:
+            if item not in parts:
+                parts.append(item)
+    return parts[:3]
 
 
 def build_interview(current: dict[str, Any]) -> list[str]:
@@ -96,26 +118,27 @@ def build_interview(current: dict[str, Any]) -> list[str]:
         exclusions = ["통신 경로", "전원 경로", "케이블/커넥터"]
 
     source_candidates = infer_source_action_candidates(current)
-    src1 = Path(source_candidates[0]["file"]).name if source_candidates else "진단 소스"
-    src2 = Path(source_candidates[1]["file"]).name if len(source_candidates) > 1 else src1
+    source_basis = Path(source_candidates[0]["file"]).name if source_candidates else "진단 로직"
+    equipment_parts = _main_equipment_parts(exclusions)
+    main_equipment_line = " / ".join(equipment_parts)
 
     # GUI에서 Yes/No 다이얼로그 4회로 받기 위해, 항상 4개의 폐쇄형 질문을 생성한다.
-    # 질문 내용은 사용자가 요구한 대로 고장/불량 항목 + 고장배제 목록 + 소스코드 조치 확인 기준으로 구성한다.
+    # 질문은 고장배제 목록의 실제 확인 여부와, 소스/설정 근거상 주장비 측 확인 필요 부위를 묻는다.
     q1 = (
-        f"불량/고장 의심 항목 '{_shorten(target)}'(시험ID {test_ids}, 위험도 {risk})에 대해 "
-        f"고장배제 1순위 '{_shorten(exclusions[0])}'부터 실제 조치할까요? (Yes/No)"
+        f"불량/고장 의심 항목 '{_shorten(target)}'(시험ID {test_ids}, 위험도 {risk})의 "
+        f"고장배제 1순위 '{_shorten(exclusions[0])}'를 실제로 확인했습니까? (Yes/No)"
     )
     q2 = (
-        f"같은 항목의 고장배제 목록 '{_shorten(' / '.join(exclusions[:3]), 120)}' 순서로 "
-        "현장 점검 체크리스트를 확정할까요? (Yes/No)"
+        f"고장배제 목록 '{_shorten(' / '.join(exclusions[:3]), 120)}' 중 케이블/전원/연동 경로를 "
+        "누락 없이 확인했습니까? (Yes/No)"
     )
     q3 = (
-        f"소스코드/설정 '{src1}'에서 해당 불량 항목의 판정·매핑 조건을 먼저 확인하고 "
-        "필요 시 수정 조치로 등록할까요? (Yes/No)"
+        f"소스/설정 근거({source_basis})상 주장비 측 확인 필요 부위로 보이는 "
+        f"'{_shorten(main_equipment_line, 100)}'를 주장비에서 확인했습니까? (Yes/No)"
     )
     q4 = (
-        f"원인분류 '{cause}'와 고장배제 결과가 맞지 않으면 '{src2}'의 로그 파싱/질문 생성 로직을 "
-        "보강한 뒤 동일 조건 재시험을 진행할까요? (Yes/No)"
+        f"원인분류 '{cause}'와 현장 확인 결과가 맞지 않을 경우, 주장비 측 추가 확인 부위와 "
+        "동일 조건 재시험 필요성을 정비 이력에 남기겠습니까? (Yes/No)"
     )
 
     return [q1, q2, q3, q4]
@@ -299,7 +322,7 @@ def run(current_report_json: Path, history_dir: Path, out_dir: Path) -> dict[str
     ]
     for i, q in enumerate(interview, 1):
         md_lines.append(f"{i}. {q}")
-    md_lines += ["", "### Source/Config Action Candidates"]
+    md_lines += ["", "### Source/Config Evidence for Main-Equipment Checks"]
     for item in source_action_candidates:
         md_lines.append(f"- {item.get('file', '')}: {item.get('action', '')} ({item.get('reason', '')})")
     md_lines += ["", "## Step7 QA"]
