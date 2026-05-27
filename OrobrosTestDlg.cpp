@@ -362,22 +362,23 @@ void COrobrosTestDlg::MaybeShowQuestionDialog(const CString& chunk)
         CString answer = (selected == IDYES) ? L"예" : L"아니요";
 
         bool childAlive = (m_running && m_childStdInWr && (!m_pi.hProcess || WaitForSingleObject(m_pi.hProcess, 0) == WAIT_TIMEOUT));
-        if (!childAlive) {
-            AppendText(L"\r\n[INFO] Dialog 응답은 기록만 하고 자동전송은 생략했습니다. (프로세스 종료)\r\n");
-            return;
-        }
 
         AppendText(L"\r\n[DIALOG ANSWER Q" + CString(std::to_wstring(m_interviewQuestionCount).c_str()) + L"] " + answer + L"\r\n");
-        DWORD writeErr = ERROR_SUCCESS;
-        if (!WriteAnswer(answer, &writeErr)) {
-            if (writeErr == ERROR_BROKEN_PIPE || writeErr == ERROR_INVALID_HANDLE) {
-                AppendText(L"[INFO] Dialog 응답 자동전송 생략: child stdin closed\r\n");
-            }
-            else {
-                CString detail = FormatWin32Error(writeErr);
-                AppendText(L"[WARN] Dialog 답변 자동전송 실패: " + detail + L"\r\n");
-                MessageBox(L"Dialog 답변 전송에 실패했습니다. Send 버튼으로 수동 전송해주세요.\r\n" + detail,
-                    L"전송 실패", MB_ICONWARNING);
+        if (!childAlive) {
+            AppendText(L"[INFO] child 종료 상태라 자동전송은 생략합니다.\r\n");
+        }
+        else {
+            DWORD writeErr = ERROR_SUCCESS;
+            if (!WriteAnswer(answer, &writeErr)) {
+                if (writeErr == ERROR_BROKEN_PIPE || writeErr == ERROR_INVALID_HANDLE) {
+                    AppendText(L"[INFO] Dialog 응답 자동전송 생략: child stdin closed\r\n");
+                }
+                else {
+                    CString detail = FormatWin32Error(writeErr);
+                    AppendText(L"[WARN] Dialog 답변 자동전송 실패: " + detail + L"\r\n");
+                    MessageBox(L"Dialog 답변 전송에 실패했습니다. Send 버튼으로 수동 전송해주세요.\r\n" + detail,
+                        L"전송 실패", MB_ICONWARNING);
+                }
             }
         }
 
