@@ -5,12 +5,43 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def _run(cmd: list[str]) -> int:
     print("[RUN] " + " ".join(cmd), flush=True)
     p = subprocess.run(cmd)
     return p.returncode
+
+
+def _normalize_yes_no(raw: str) -> str:
+    v = (raw or "").strip().lower()
+    yes_set = {"y", "yes", "1", "예", "ㅇ", "응", "네"}
+    no_set = {"n", "no", "0", "아니요", "아니오", "ㄴ"}
+    if v in yes_set:
+        return "예"
+    if v in no_set:
+        return "아니요"
+    return "아니요"
+
+
+def _collect_interview_answers(step7: dict[str, Any]) -> list[str]:
+    questions = step7.get("interview_questions", []) if isinstance(step7, dict) else []
+    if not isinstance(questions, list):
+        return []
+
+    answers: list[str] = []
+    for i, q in enumerate(questions[:4], 1):
+        print(f"[INTERVIEW_Q{i}] {q}", flush=True)
+        try:
+            user_input = input()
+        except EOFError:
+            user_input = "아니요"
+        yn = _normalize_yes_no(user_input)
+        answers.append(yn)
+        print(f"[INTERVIEW_A{i}] {yn}", flush=True)
+
+    return answers
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -70,13 +101,16 @@ def main(argv: list[str] | None = None) -> int:
             step7 = review_data.get("step7", {})
             evaluate = step7.get("evaluate", {})
             qa_checks = step7.get("qa_checks", [])
-            interview_questions = step7.get("interview_questions", [])
             print(
                 f"[REVIEW] score={evaluate.get('score', 'n/a')} verdict={evaluate.get('verdict', 'n/a')} qa_checks={len(qa_checks)}",
                 flush=True,
             )
-            for i, q in enumerate(interview_questions, 1):
-                print(f"[INTERVIEW_Q{i}] {q}", flush=True)
+
+            # 질문 4개를 순차 출력하고 stdin 응답(Yes/No)을 실제로 수신할 때까지 대기한다.
+            answers = _collect_interview_answers(step7)
+            if answers:
+                review_data.setdefault("step7", {})["interview_answers"] = answers
+                review_json.write_text(json.dumps(review_data, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as ex:
             print(f"[REVIEW] summary parse skipped: {ex}", flush=True)
 
